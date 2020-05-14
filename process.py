@@ -93,7 +93,7 @@ class Process:
                 datas.append(Dict)
 
             return datas
-    
+
     # 读取异常数据
     def abnormalDatas(self, sign, date):
         datas = []
@@ -225,50 +225,56 @@ class Process:
             self.printResult(e, "error:  ")
             self.coon.rollback()
 
-    # 台区电流数据算法
-    def electricCur(self, tgId, datas):
-        curs = []
-        for data in datas:
-            if tgId == data['consTgId']:
-                curs.append(data)
-
-            if len(curs) == 3:
-                break
-
-        for cur in curs:
-            for key, value in cur.items():
-                if key == '':
-                    break
-
-        return 0
-
-    # 台区电压数据算法
-    def electricVol(self, tgId, datas):
-        vols = []
-        ua = 0
-        ub = 0
-        uc = 0
+    # 台区电流,电压数据算法
+    def electric(self, tgId, sign, datas):
+        eDatas = []
+        a = []
+        b = []
+        c = []
+        loss = 0
+        imbalance = 0
 
         for data in datas:
             if tgId == data['consTgId']:
-                vols.append(data)
+                eDatas.append(data)
 
-            if len(vols) == 3:
-                break
+        if len(eDatas) < 3:
+            return 0
 
-        for vol in vols:
-            for key, value in vol.items():
+        for eData in eDatas:
+            for key, value in eData.items():
                 if key == 'consTgId' or key == 'threePhase':
                     continue
 
-                if vol['threePhase'] == 'ua':
-                    ua += value
-                elif vol['threePhase'] == 'ub':
-                    ub += value
-                elif vol['threePhase'] == 'uc':
-                    uc += value
+                if eData['threePhase'] == 'ia' or eData['threePhase'] == 'ua':
+                    a.append(float(value))
+                elif eData['threePhase'] == 'ib' or eData['threePhase'] == 'ub':
+                    b.append(float(value))
+                elif eData['threePhase'] == 'ic' or eData['threePhase'] == 'uc':
+                    c.append(float(value))
 
-        return 0
+        for i in range(24):
+            Min = min(a[i], b[i], c[i])
+            Max = max(a[i], b[i], c[i])
+            Count = a[i] + b[i] + c[i]
+
+            if a[i] == 0 or b[i] == 0 or c[i] == 0:
+                loss += 1
+
+            if Count == 0:
+                continue
+
+            if (Max-Min)/Count > Set.THRESHOLD[sign]:
+                imbalance += 1
+
+        if loss > Set.THRESHOLD['DAY']:
+            # print('%s, loss, tgId:%s' % (sign, tgId))
+            return 1
+        elif imbalance > Set.THRESHOLD['DAY']:
+            # print('%s, imbalance, tgId:%s' % (sign, tgId))
+            return 2
+        else:
+            return 0
 
     # 台区功率因数算法
     def powerFactor(self, tgId, datas):
@@ -292,10 +298,10 @@ class Process:
             except Exception:
                 value = 0
 
-            if value < 80:
+            if value < Set.THRESHOLD['FACTOR']:
                 rate += 1
 
-        if rate > 5:
+        if rate > Set.THRESHOLD['DAY']:
             return 1
         else:
             return 0
@@ -339,9 +345,9 @@ class Process:
             elif power > (cap * 0.8):
                 heavyload += 1
 
-        if overload > 5:
+        if overload > Set.THRESHOLD['DAY']:
             return 2
-        elif heavyload > 5:
+        elif heavyload > Set.THRESHOLD['DAY']:
             return 1
         else:
             return 0
@@ -478,18 +484,18 @@ class Process:
 
             tData['overload'] = self.overload(tData['tgId'], pDatas, bDatas)
             tData['powerFactor'] = self.powerFactor(tData['tgId'], fDatas)
-            # tData['electricCur'] = self.electricCur(tData['tgId'], cDatas)
-            # tData['electricVol'] = self.electricVol(tData['tgId'], vDatas)
+            tData['electricCur'] = self.electric(tData['tgId'], 'EC', cDatas)
+            tData['electricVol'] = self.electric(tData['tgId'], 'EV', vDatas)
 
-        # self.modData('tg_power_info', 'lastPowerSup', tDatas)
-        # self.modData('tg_power_info', 'lastPowerSal', tDatas)
-        # self.modData('tg_power_info', 'abnormalSup', tDatas)
-        # self.modData('tg_power_info', 'abnormalSal', tDatas)
-        # self.modData('tg_power_info', 'abnormalType', tDatas)
-        # self.modData('tg_power_info', 'overload', tDatas)
+        self.modData('tg_power_info', 'lastPowerSup', tDatas)
+        self.modData('tg_power_info', 'lastPowerSal', tDatas)
+        self.modData('tg_power_info', 'abnormalSup', tDatas)
+        self.modData('tg_power_info', 'abnormalSal', tDatas)
+        self.modData('tg_power_info', 'abnormalType', tDatas)
+        self.modData('tg_power_info', 'overload', tDatas)
         self.modData('tg_power_info', 'powerFactor', tDatas)
-        # self.modData('tg_power_info', 'electricCur', tDatas)
-        # self.modData('tg_power_info', 'electricVol', tDatas)
+        self.modData('tg_power_info', 'electricCur', tDatas)
+        self.modData('tg_power_info', 'electricVol', tDatas)
 
     # 关口数据分析
     def gateData(self):
@@ -564,7 +570,7 @@ class Process:
             if tData['lastPeriod'] != 0:
                 datas.append(tData)
 
-        self.modData('user_table_value', 'consAbnormal', datas)  
+        self.modData('user_table_value', 'consAbnormal', datas)
 
     # 执行数据处理
     def implement(self):
