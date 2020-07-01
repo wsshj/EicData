@@ -4,53 +4,12 @@ import datetime
 import pymysql
 
 import settings as Set
+from base import Base
 
 
-class Process:
+class Process(Base):
     def __init__(self, date):
-        self.strDate = date.strftime('%Y-%m-%d')
-        self.strLastDate = (date -
-                            datetime.timedelta(days=1)).strftime('%Y-%m-%d')
-        self.coon, self.cur = self.connectSQL()
-        self.file = self.openFile()
-
-    # 连接数据库
-    def connectSQL(self):
-        coon = pymysql.connect(host=Set.SQL['host'],
-                               port=Set.SQL['port'],
-                               user=Set.SQL['user'],
-                               passwd=Set.SQL['passwd'],
-                               db=Set.SQL['db'],
-                               charset=Set.SQL['charset'])
-
-        return coon, coon.cursor()
-
-    # 打开日志文件
-    def openFile(self):
-        if not os.path.exists('log'):
-            os.mkdir('log')
-        print(self.strDate)
-        filePath = 'log\\process-%s.txt' % (self.strDate)
-        print(filePath)
-        try:
-            f = open(filePath, 'a', encoding='utf-8')
-        except IOError as e:
-            print(e)
-        else:
-            return f
-
-    # 写日志文件
-    def writeFile(self, info, level=''):
-        try:
-            localTime = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
-            self.file.write('%swriteTime:%s; %s\n' % (level, localTime, info))
-        except Exception as e:
-            print(e)
-
-    # 输出日志文件,结果信息
-    def printResult(self, info, level):
-        self.writeFile(info, level)
-        print(info)
+        Base.__init__(self, date)
 
     # 处理字段
     def operationField(self, field):
@@ -122,9 +81,9 @@ class Process:
                         GROUP BY lineId;" % (date)
         elif sign == 'hv':
             command = " SELECT PBLineId, \
+                        COUNT(haveValue!=1 or null) AS abVal, \
                         COUNT(mpZxAbnormal!=0 or null) AS abZx, \
-                        COUNT(mpFxAbnormal!=0 or null) AS abFx, \
-                        COUNT(haveValue!=1 or null) AS abVal \
+                        COUNT(mpFxAbnormal!=0 or null) AS abFx \
                         FROM tg_table_value \
                         WHERE statDate='%s' \
                         AND consType='02' \
@@ -153,6 +112,22 @@ class Process:
                 datas.append(Dict)
 
             return datas
+
+    # 清理当日爬取的无效数据
+    def cleanInvalidData(self, tableName, fieldName, date):
+        command = " DELETE FROM %s \
+                    WHERE %s IS NULL \
+                    AND statDate='%s';" % (tableName, fieldName, date)
+
+        try:
+            num = self.cur.execute(command)
+            self.coon.commit()
+            self.printResult(
+                'date: %s; tableName: %s; clean invalid data %s row;' %
+                (self.strDay, tableName, num), 'succ:  ')
+        except Exception as e:
+            self.printResult(e, "error:  ")
+            self.coon.rollback()
 
     # 计算电量突增，突减
     def calculation(self, now, last):
@@ -220,7 +195,7 @@ class Process:
             self.coon.commit()
             self.printResult(
                 'date: %s; tableName: %s; fieldName: %s;' %
-                (self.strDate, tableName, fieldName), 'succ:  ')
+                (self.strDay, tableName, fieldName), 'succ:  ')
         except Exception as e:
             self.printResult(e, "error:  ")
             self.coon.rollback()
@@ -246,6 +221,9 @@ class Process:
                 if key == 'consTgId' or key == 'threePhase':
                     continue
 
+                if value == '':
+                    value = 0
+
                 if eData['threePhase'] == 'ia' or eData['threePhase'] == 'ua':
                     a.append(float(value))
                 elif eData['threePhase'] == 'ib' or eData['threePhase'] == 'ub':
@@ -258,7 +236,7 @@ class Process:
             Max = max(a[i], b[i], c[i])
             Count = a[i] + b[i] + c[i]
 
-            if a[i] == 0 or b[i] == 0 or c[i] == 0:
+            if a[i] < 0.01 or b[i] < 0.01 or c[i] < 0.01:
                 loss += 1
 
             if Count == 0:
@@ -268,10 +246,8 @@ class Process:
                 imbalance += 1
 
         if loss > Set.THRESHOLD['DAY']:
-            # print('%s, loss, tgId:%s' % (sign, tgId))
             return 1
         elif imbalance > Set.THRESHOLD['DAY']:
-            # print('%s, imbalance, tgId:%s' % (sign, tgId))
             return 2
         else:
             return 0
@@ -367,17 +343,17 @@ class Process:
             'powerSal',
         )
         # 异常数据
-        aDatas = self.dateData(AIfield, 'line_abnormal_info', self.strDate)
+        aDatas = self.dateData(AIfield, 'line_abnormal_info', self.strDay)
         # 昨日数据
-        yDatas = self.dateData(PIfield, 'line_power_info', self.strLastDate)
+        yDatas = self.dateData(PIfield, 'line_power_info', self.strLastDay)
         # 今日数据
-        tDatas = self.dateData(PIfield, 'line_power_info', self.strDate)
+        tDatas = self.dateData(PIfield, 'line_power_info', self.strDay)
         # 异常台区数量数据
-        tgDatas = self.abnormalDatas('tg', self.strDate)
+        tgDatas = self.abnormalDatas('tg', self.strDay)
         # 异常关口数量数据
-        gateDatas = self.abnormalDatas('gate', self.strLastDate)
+        gateDatas = self.abnormalDatas('gate', self.strLastDay)
         # 异常专变数量数据
-        hvDatas = self.abnormalDatas('hv', self.strDate)
+        hvDatas = self.abnormalDatas('hv', self.strDay)
 
         for tData in tDatas:
             for yData in yDatas:
@@ -450,21 +426,21 @@ class Process:
         Bfield = ('tgId', 'tgCap')
 
         # 异常数据
-        aDatas = self.dateData(AIfield, 'tg_abnormal_info', self.strDate)
+        aDatas = self.dateData(AIfield, 'tg_abnormal_info', self.strDay)
         # 昨日数据
-        yDatas = self.dateData(PIfield, 'tg_power_info', self.strLastDate)
+        yDatas = self.dateData(PIfield, 'tg_power_info', self.strLastDay)
         # 今日数据
-        tDatas = self.dateData(PIfield, 'tg_power_info', self.strDate)
+        tDatas = self.dateData(PIfield, 'tg_power_info', self.strDay)
         # 台区容量数据
         bDatas = self.dateData(Bfield, 'tg_base')
         # 功率曲线算法
-        pDatas = self.dateData(CVFfield, 'tg_power_curve', self.strDate)
+        pDatas = self.dateData(CVFfield, 'tg_power_curve', self.strDay)
         # 电流数据
-        cDatas = self.dateData(CVFfield, 'tg_electric_current', self.strDate)
+        cDatas = self.dateData(CVFfield, 'tg_electric_current', self.strDay)
         # 电压数据
-        vDatas = self.dateData(CVFfield, 'tg_electric_voltage', self.strDate)
+        vDatas = self.dateData(CVFfield, 'tg_electric_voltage', self.strDay)
         # 功率因数数据
-        fDatas = self.dateData(CVFfield, 'tg_power_factor', self.strDate)
+        fDatas = self.dateData(CVFfield, 'tg_power_factor', self.strDay)
 
         for tData in tDatas:
             for yData in yDatas:
@@ -484,8 +460,16 @@ class Process:
 
             tData['overload'] = self.overload(tData['tgId'], pDatas, bDatas)
             tData['powerFactor'] = self.powerFactor(tData['tgId'], fDatas)
-            tData['electricCur'] = self.electric(tData['tgId'], 'EC', cDatas)
-            tData['electricVol'] = self.electric(tData['tgId'], 'EV', vDatas)
+            
+            if len(cDatas) == 0:
+                tData['electricCur'] = 0
+            else:
+                tData['electricCur'] = self.electric(tData['tgId'], 'EC', cDatas)
+
+            if len(vDatas) == 0:
+                tData['electricVol'] = 0
+            else:
+                tData['electricVol'] = self.electric(tData['tgId'], 'EV', vDatas)
 
         self.modData('tg_power_info', 'lastPowerSup', tDatas)
         self.modData('tg_power_info', 'lastPowerSal', tDatas)
@@ -501,9 +485,9 @@ class Process:
     def gateData(self):
         PIfield = ('id', 'mpId', 'zxPower', 'fxPower', 'zxSbd')
         # 昨日数据
-        yDatas = self.dateData(PIfield, 'gateway_power_info', self.strLastDate)
+        yDatas = self.dateData(PIfield, 'gateway_power_info', self.strLastDay)
         # 今日数据
-        tDatas = self.dateData(PIfield, 'gateway_power_info', self.strDate)
+        tDatas = self.dateData(PIfield, 'gateway_power_info', self.strDay)
 
         for tData in tDatas:
             for yData in yDatas:
@@ -532,7 +516,7 @@ class Process:
         PIfield = ('id', 'mpLastZxPower', 'mpZxPower', 'mpLastFxPower',
                    'mpFxPower', 'zxsbd')
         # 今日数据
-        tDatas = self.dateData(PIfield, 'tg_table_value', self.strDate)
+        tDatas = self.dateData(PIfield, 'tg_table_value', self.strDay)
 
         datas = []
         for tData in tDatas:
@@ -556,30 +540,226 @@ class Process:
 
     # 用户数据分析(窃电分析)
     def UTVData(self):
-        PIfield = ('id', 'lastPeriod')
+        userTable = 'user_table_value%s' % self.strTableMonth
+
+        PIfield = ('id', 'consId', 'lastMrNum', 'thisRead', 'thisReadPq', 'lastReadPq', 'lastPeriod')
         # 今日数据
-        tDatas = self.dateData(PIfield, 'user_table_value', self.strDate)
+        tDatas = self.dateData(PIfield, userTable, self.strDay)
 
         datas = []
         for tData in tDatas:
-            if float(tData['lastPeriod']) > 30:
-                tData['consAbnormal'] = 2
-            elif float(tData['lastPeriod']) < -30:
+            if tData['lastMrNum'] == '' or tData['thisRead'] == '':
                 tData['consAbnormal'] = 1
+            elif tData['thisReadPq'] == '0.00' or tData['lastReadPq'] == '0.00':
+                tData['consAbnormal'] = 2
+            elif float(tData['lastPeriod']) > 30:
+                tData['consAbnormal'] = 3
+            elif float(tData['lastPeriod']) < -30:
+                tData['consAbnormal'] = 4
+            else:
+                tData['consAbnormal'] = 0
 
-            if tData['lastPeriod'] != 0:
+            if tData['consAbnormal'] != 0:
                 datas.append(tData)
+        print(len(datas))
 
-        self.modData('user_table_value', 'consAbnormal', datas)
+        # self.modData(userTable, 'consAbnormal', datas)
+
+    # 将北一区台区的 tg_power_info 数据和 tg_table_value 数据整合
+    def tgMergeData(self):
+        command = " SELECT COUNT(*) FROM tg_byq_info \
+                    WHERE statDate='%s';" % (self.strDay)
+
+        self.cur.execute(command)
+        result = self.cur.fetchall()
+
+        if result[0][0] > 0:
+            self.printResult(
+                'date: %s; tableName: %s; fieldName: %s; 当日数据已处理' %
+                (self.strDay, 'tg_byq_info', 'byqField'), 'succ:  ')
+            return
+
+        byqField = (
+            'orgId',  # '单位id',
+            'orgName',  # '单位名称',
+
+            'lineId',  # '线路id',
+            'lineNo',  # '线路编号',
+            'lineName',  # '线路名称',
+            'lineType',
+
+            'tgId',  # '台区id',
+            'tgNo',  # '台区编号',
+            'tgName',  # '台区名称',
+
+            'abnormalType',  # '台区异常类型（0：正常，1：负损，2：高损，3：不可算）',
+
+            'lastPowerSup',  # '上一日供电量',
+            'powerSup',  # '供电量',
+            'abnormalSup',  # '供电异常类型（0：正常，1：突减，2：突增）',
+
+            'lastPowerSal',  # '上一日售电量',
+            'powerSal',  # '售电量',
+            'abnormalSal',  # '售电异常类型（0：正常，1：突减，2：突增）',
+
+            'powerOut',  # '输出电量',
+            'powerLoss',  # '损失电量',
+            'rateLoss',  # '线损率',
+
+            'accNum',  # '连续达标天数',
+            'accNotNum',  # '连续不达标天数',
+            'accStartDate',  # '连续开始日期',
+            'ccNum',  # '达标情况',
+
+            'tgMpNum',  # '台区总表数',
+            'pmCopNum',  # '台区成功数',
+            'pmSucEate',  # '台区采集成功率',
+
+            'lvConsNum',  # '低压用户数',
+            'vmCopNum',  # '用户成功数',
+            'vmSucRate',  # '用户采集成功率',
+
+            'overload',  # '重过载（0：正常，1：重载，2：过载）',
+            'electricVol',  # '电压（0：正常，1：失压，2：三相不平衡）',
+            'electricCur',  # '电流（0：正常，1：失流，2：三相不平衡）',
+            'powerFactor',  # '功率因数（0：正常，1：异常）',
+
+            'relAddMinusPap',  # '正向加减关系',
+            'tFactor',  # '倍率',
+
+            'mpLastZxPower',  # '昨日正向电量',
+            'mpZxPower',  # '正向电量',
+            'mpZxAbnormal',  # '正向电量异常（0：正常，1：突减，2：突增）',
+            'mpLastFxPower',  # '昨日日反向电量',
+            'mpFxPower',  # '反向电量',
+            'mpFxAbnormal',  # '反向电量异常（0：正常，1：突减，2：突增）',
+
+            'zxsbd',  # '正向上表底',
+            'zxxbd',  # '正向下表底',
+            'fxsbd',  # '反向上表底',
+            'fxxbd',  # '反向下表底',
+
+            'success',  # '是否成功',
+            'haveValue',  # '有无表底（0：无，1：有）',
+
+            'statDate'  # '日期',
+        )
+
+        # 电量信息字段
+        field = (
+            'pi.orgId',  # '单位id',
+            'pi.orgName',  # '单位名称',
+
+            'tv.PBLineId',  # '匹配的线路id',
+            'tv.PBLineNo',  # '匹配的线路编号',
+            'tv.PBLineName',  # '匹配的线路名称',
+            'tv.PBLineType',  # '匹配的线路类型',
+
+            'pi.tgId',  # '台区id',
+            'pi.tgNo',  # '台区编号',
+            'pi.tgName',  # '台区名称',
+
+            'pi.abnormalType',  # '线损异常类型'
+
+            'pi.lastPowerSup',  # 上一日供电量
+            'pi.powerSup',  # '供电量',
+            'pi.abnormalSup',  # '供电量异常类型'
+
+            'pi.lastPowerSal',  # 上一日售电量
+            'pi.powerSal',  # '售电量',
+            'pi.abnormalSal',  # '售电量异常类型',
+
+            'pi.powerOut',  # '输出电量',
+            'pi.powerLoss',  # '损失电量',
+            'pi.rateLoss',  # '线损率',
+
+            'pi.accNum',  # '连续达标天数',
+            'pi.accNotNum',  # '连续不达标天数',
+            'pi.accStartDate',  # '连续开始日期',
+            'pi.ccNum',  # '达标情况',
+
+            'pi.tgMpNum',  # '台区总表数',
+            'pi.pmCopNum',  # '台区成功数',
+            'pi.pmSucEate',  # '台区采集成功率',
+
+            'pi.lvConsNum',  # '低压用户数',
+            'pi.vmCopNum',  # '用户成功数',
+            'pi.vmSucRate',  # '用户采集成功率',
+
+            'pi.overload',  # '重过载（0：正常，1：重载，2：过载）',
+            'pi.electricVol',  # '电压（0：正常，1：失压，2：三相不平衡）',
+            'pi.electricCur',  # '电流（0：正常，1：失流，2：三相不平衡）',
+            'pi.powerFactor',  # '功率因数（0：正常，1：异常）',
+
+            'tv.relAddMinusPap',  # '正向加减关系',
+            'tv.tFactor',  # '倍率',
+
+            'tv.mpLastZxPower',  # '昨日正向电量',
+            'tv.mpZxPower',  # '正向电量',
+            'tv.mpZxAbnormal',  # '正向电量异常（0：正常，1：突减，2：突增）',
+            'tv.mpLastFxPower',  # '昨日日反向电量',
+            'tv.mpFxPower',  # '反向电量',
+            'tv.mpFxAbnormal',  # '反向电量异常（0：正常，1：突减，2：突增）',
+
+            'tv.zxsbd',  # '正向上表底',
+            'tv.zxxbd',  # '正向下表底',
+            'tv.fxsbd',  # '反向上表底',
+            'tv.fxxbd',  # '反向下表底',
+
+            'tv.success',  # '是否成功',
+            'tv.haveValue',  # '有无表底（0：无，1：有）',
+
+            'pi.statDate',  # '日期',
+        )
+
+        command = " CREATE TEMPORARY TABLE tmp_power_info \
+                    SELECT * FROM tg_power_info \
+                    WHERE tgId IN (SELECT tgId FROM tg_byq) \
+                    AND statDate='%s' \
+                    GROUP BY tgId;" % (self.strDay)
+
+        self.cur.execute(command)
+
+        command = " CREATE TEMPORARY TABLE tmp_table_value \
+                    SELECT * FROM tg_table_value \
+                    WHERE consTgId IN (SELECT tgId FROM tg_byq) \
+                    AND statDate='%s' \
+                    GROUP BY consTgId;" % (self.strDay)
+
+        self.cur.execute(command)
+
+        strByqField = self.operationField(byqField)
+        strField = self.operationField(field)
+
+        command = " INSERT INTO tg_byq_info(%s) \
+                    SELECT %s FROM tmp_power_info AS pi \
+                    LEFT JOIN tmp_table_value AS tv \
+                    ON pi.tgId=tv.consTgId;" % (strByqField, strField)
+
+        self.cur.execute(command)
+
+        self.printResult(
+                'date: %s; tableName: %s; fieldName: %s;' %
+                (self.strDay, 'tg_byq_info', 'byqField'), 'succ:  ')
+
+        command = "DROP TABLE tmp_power_info"
+        self.cur.execute(command)
+
+        command = "DROP TABLE tmp_table_value"
+        self.cur.execute(command)
 
     # 执行数据处理
     def implement(self):
+        # 数据清洗
+        self.cleanInvalidData('tg_power_info', 'powerSup', self.strDay)
+
+        # 数据分析处理
         self.tgData()
-        # self.gateData()
-        # self.TVData()
-        # self.lineData() # 放在最后，因为要最后统计前面三者异常数
+        self.gateData()
+        self.TVData()
+        # self.UTVData()
+        self.lineData()  # 放在这里，因为要最后统计前面三者异常数
+        self.tgMergeData()  # 放在这里，因为要结合 tg_power_info 和 tg_table_value
 
     def __del__(self):
-        self.cur.close()
-        self.coon.close()
-        self.file.close()
+        Base.__del__(self)

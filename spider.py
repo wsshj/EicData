@@ -6,45 +6,19 @@ import json
 import pymysql
 
 import settings as Set
+from base import Base
 
 
-class Spider:
+class Spider(Base):
     def __init__(self, date):
-        self.date = date
-        self.strDate = date.strftime('%Y-%m-%d')
-        self.strLastDate = (date -
-                            datetime.timedelta(days=1)).strftime('%Y-%m-%d')
-        self.coon, self.cur = self.connectSQL()
-        self.file = self.openFile()
+        Base.__init__(self, date)
         self.session = self.login()
 
-    # 连接数据库
-    def connectSQL(self):
-        coon = pymysql.connect(host=Set.SQL['host'],
-                               port=Set.SQL['port'],
-                               user=Set.SQL['user'],
-                               passwd=Set.SQL['passwd'],
-                               db=Set.SQL['db'],
-                               charset=Set.SQL['charset'])
-
-        return coon, coon.cursor()
-
-    # 打开日志文件
-    def openFile(self):
-        if not os.path.exists('log'):
-            os.mkdir('log')
-
-        filePath = 'log\\%s.txt' % (self.strDate)
-
-        try:
-            File = open(filePath, 'a', encoding='utf-8')
-        except IOError as e:
-            print(e)
-        else:
-            return File
-
     # 数据插入对应表
-    def insertSQL(self, tableName, colunm, datas):
+    def insertSQL(self, sgin, datas, tableDate=''):
+        tableName = Set.TABLE_NAME[sgin] + tableDate
+        colunm = Set.TABLE[sgin]
+
         if len(datas) == 0:
             self.printResult(
                 "table(%s):Data write error; datas is empty." % tableName,
@@ -75,6 +49,36 @@ class Spider:
             self.printResult(e, "error:  ")
             self.coon.rollback()
 
+    # 如果表不存在则创建表
+    def createTable(self, tableName, sourceTable):
+        sql = ' SELECT count(*) AS count \
+                FROM information_schema.tables \
+                WHERE table_name="%s";' % (tableName)
+
+        try:
+            self.cur.execute(sql)
+            res = self.cur.fetchall()
+        except Exception as e:
+            self.printResult(e, "error:  ")
+            self.coon.rollback()
+            return False
+
+        if res[0][0] == 0:
+            sql = "create table %s LIKE %s" % (tableName, sourceTable)
+
+            try:
+                self.cur.execute(sql)
+                self.coon.commit()
+                self.printResult(
+                    "table(%s):Table create successfully." % tableName,
+                    "succ:  ")
+            except Exception as e:
+                self.printResult(e, "error:  ")
+                self.coon.rollback()
+                return False
+
+        return True
+
     # 通过与前一日数据量比对，判断数据爬取是否成功
     def isEnoughData(self, tableName, dataNum):
         if tableName == 'line_abnormal_info' or tableName == 'tg_abnormal_info':
@@ -82,7 +86,7 @@ class Spider:
 
         sql = " SELECT statDate \
                 FROM %s \
-                WHERE statDate='%s';" % (tableName, self.strLastDate)
+                WHERE statDate='%s';" % (tableName, self.strLastDay)
 
         try:
             lastNum = self.cur.execute(sql)
@@ -94,21 +98,26 @@ class Spider:
         if lastNum == 0:
             return True
 
-        cRate = round(abs(dataNum - lastNum) / lastNum, 3)
+        cRate = round((dataNum - lastNum) / lastNum, 3)
         self.printResult(
             "table(%s):The number of data is %s;" % (tableName, cRate),
             "tips:  ")
 
-        if cRate <= 0.050:
+        if cRate >= -0.050:
             return True
         else:
             return False
 
     # 查询线路表中当日数据的线路ID和线路Type
-    def selectLineSQL(self):
-        sql = " SELECT lineId,lineNo,lineName,lineType \
-                FROM line_power_info \
-                WHERE statDATE='%s';" % self.strDate
+    def selectLineSQL(self, dateType='d'):
+        if dateType == 'd':
+            sql = " SELECT lineId,lineNo,lineName,lineType \
+                    FROM line_power_info \
+                    WHERE statDate='%s';" % self.strDay
+        elif dateType == 'm':
+            sql = " SELECT lineId,lineNo,lineName,lineType \
+                    FROM line_power_month_info \
+                    WHERE statDate='%s';" % self.strLastMonth
 
         try:
             self.cur.execute(sql)
@@ -120,13 +129,9 @@ class Spider:
         else:
             return res
 
-    # 查询台区表中当日数据的台区ID
+    # 查询北一区台区的TgId
     def selectTGSQL(self):
-        sql = " SELECT tg.tgId \
-                FROM tg_power_info AS tg \
-                INNER JOIN byq_tgcode AS byq \
-                WHERE tg.tgNo=byq.tgNo \
-                AND tg.statDATE='%s';" % self.strDate
+        sql = "SELECT tgId FROM tg_byq;"
 
         try:
             self.cur.execute(sql)
@@ -138,61 +143,55 @@ class Spider:
         else:
             return res
 
-    # 查询对应表中当日数据的数量
-    def selectDateSQL(self, sign):
-        if sign == 'IRC':
-            sql = "SELECT statDate FROM %s WHERE statDate='%s';" % (
-                Set.TABLE_NAME[sign], self.strLastDate)
-        else:
-            sql = "SELECT statDate FROM %s WHERE statDate='%s';" % (
-                Set.TABLE_NAME[sign], self.strDate)
+    # 查询北一区高压用户的consTgId
+    def selectHVUSQL(self):
+        sql = "SELECT consTgId FROM hvu_byq;"
 
         try:
-            res = self.cur.execute(sql)
+            self.cur.execute(sql)
+            res = self.cur.fetchall()
         except Exception as e:
             self.printResult(e, "error:  ")
             self.coon.rollback()
-            return -1
+            return ()
         else:
             return res
 
     # 判断是否已存在当天数据
-    def isExist(self, sign):
-        date = self.strDate
+    def isExist(self, sign, tableDate=''):
+        tableName = Set.TABLE_NAME[sign] + tableDate
+        sourceTable = Set.TABLE_NAME[sign]
+    
         if sign == 'IRC':
-            date = self.strLastDate
+            strDate = self.strLastDay
+        elif sign in Set.SIGN_M:
+            strDate = self.strLastMonth
+        else:
+            strDate = self.strDay
 
-        num = self.selectDateSQL(sign)
+        if tableName != sourceTable:
+            self.createTable(tableName, sourceTable)
+
+        sql = "SELECT statDate FROM %s WHERE statDate='%s';" % (
+            tableName, strDate)
+
+        try:
+            num = self.cur.execute(sql)
+        except Exception as e:
+            self.printResult(e, "error:  ")
+            self.coon.rollback()
+            num = -1
+
         if num < 0:
-            print("\n数据类型：%s；数据日期：%s；状态：数据查询错误；" % (Set.SIGN[sign], date))
+            print("\n数据类型：%s；数据日期：%s；状态：数据查询错误；" % (Set.SIGN[sign], strDate))
             return True
         elif num > 0:
             print("\n数据类型：%s；数据日期：%s；数据量：%s；状态：已执行；" %
-                  (Set.SIGN[sign], date, num))
+                  (Set.SIGN[sign], strDate, num))
             return True
         else:
             print("\n数据类型：%s；状态：未执行；开始执行..." % (Set.SIGN[sign]))
             return False
-
-    # 写日志文件
-    def writeFile(self, info, level=''):
-        try:
-            localTime = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
-            self.file.write('%swriteTime:%s; %s\n' % (level, localTime, info))
-        except Exception as e:
-            self.printResult(e, "error:  ")
-
-    # 输出日志文件,基本信息
-    def printInfo(self, date, sign, dataNum, other=''):
-        strPrint = "date:%s; sign:%s; dataNum:%s; %s" % (date, sign, dataNum,
-                                                         other)
-        self.writeFile(strPrint)
-        print(strPrint)
-
-    # 输出日志文件,结果信息
-    def printResult(self, info, level):
-        self.writeFile(info, level)
-        print(info)
 
     # 模拟登录
     def login(self):
@@ -217,12 +216,23 @@ class Spider:
     def requestData(self, sign, tupleData, waitTime=Set.WAIT_TIME):
         if len(Set.PARAMS.get(sign, '')) == 0:
             try:
-                params = {
-                    'statDate': tupleData[0],
-                    'orgId': tupleData[1],
-                    'tgId': tupleData[2],
-                    'meterId': 'null'
-                }
+                if 'TG' in sign:
+                    params = {
+                        'statDate': tupleData[0],
+                        'orgId': tupleData[1],
+                        'tgId': tupleData[2],
+                        'meterId': 'null'
+                    }
+                elif 'HVU' in sign:
+                    params = {
+                        'statDate': tupleData[0],
+                        'orgId': tupleData[1],
+                        'consId': tupleData[2],
+                        'meterId': 'null'
+                    }
+                else:
+                    params = {}
+
                 respon = self.session.get(Set.URL[sign], params=params)
                 datas = json.loads(respon.text)
             except Exception as e:
@@ -258,12 +268,14 @@ class Spider:
                 values.append(tuple(value))
         else:
             for data in datas:
+                if type(datas) == str:
+                    break
                 if len(datas[data]) == 0:
                     break
                 value = []
                 value.append(tgId)
-                value.append(self.strDate)
-                if sign == 'TGEC' or sign == 'TGEV':
+                value.append(self.strDay)
+                if 'EC' in sign or 'EV' in sign:
                     value.append(data)
                 if len(datas[data]) < 24:
                     for i in range(24 - len(datas[data])):
@@ -274,6 +286,26 @@ class Spider:
 
         return values
 
+    # 台区和高压用户电流，电压，功率因数，功率曲线统一爬取方法
+    def TGHVU_CVPF_Info(self, sign, consTgIds):
+        datas = []
+
+        for consTgId in consTgIds:
+            data = self.requestData(sign, (self.strDay, Set.ORG_ID[0], consTgId[0]))
+
+            if len(data) == 0:
+                self.printInfo(self.strDay, sign, len(datas),
+                               'consTgId:%s; isNULL; ' % (consTgId[0]))
+                continue
+            
+            for subData in data:
+                datas += self.processData(sign, subData, consTgId[0])
+
+            self.printInfo(self.strDay, sign, len(datas),
+                           'consTgId:%s; ' % (consTgId[0]))
+
+        return datas
+
     # 爬取台区异常信息
     def TG_Abnormal_Info(self):
         sign = 'TGAI'
@@ -282,14 +314,14 @@ class Spider:
         for Type in Set.ABNORMAL_TYPE:
             for page in range(1, 1000):
                 data = self.requestData(
-                    sign, (self.strDate, Type, page, Set.PAGE_SIZE))
+                    sign, (self.strDay, Type, page, Set.PAGE_SIZE))
                 for subData in data:
                     subData['ABNORMAL_TYPE'] = Type
                     subData['statDate'] = subData['STAT_DATE']
 
                 datas += data
 
-                self.printInfo(self.strDate, sign, len(datas),
+                self.printInfo(self.strDay, sign, len(datas),
                                'Type:%s; page:%s; ' % (Type, page))
 
                 if len(data) < Set.PAGE_SIZE:
@@ -305,14 +337,14 @@ class Spider:
         for Type in Set.ABNORMAL_TYPE:
             for page in range(1, 1000):
                 data = self.requestData(
-                    sign, (Type, self.strDate, page, Set.PAGE_SIZE))
+                    sign, (Type, self.strDay, page, Set.PAGE_SIZE))
                 for subData in data:
                     subData['ABNORMAL_TYPE'] = Type
                     subData['statDate'] = subData['STAT_DATE']
 
                 datas += data
 
-                self.printInfo(self.strDate, sign, len(datas),
+                self.printInfo(self.strDay, sign, len(datas),
                                'Type:%s; page:%s; ' % (Type, page))
 
                 if len(data) < Set.PAGE_SIZE:
@@ -326,10 +358,10 @@ class Spider:
         datas = []
 
         for page in range(1, 1000):
-            data = self.requestData(sign, (self.strDate, page, Set.PAGE_SIZE))
+            data = self.requestData(sign, (self.strDay, page, Set.PAGE_SIZE))
             datas += data
 
-            self.printInfo(self.strDate, sign, len(datas),
+            self.printInfo(self.strDay, sign, len(datas),
                            'page:%s; ' % (page))
 
             if len(data) < Set.PAGE_SIZE:
@@ -347,7 +379,7 @@ class Spider:
                 continue
             for page in range(1, 1000):
                 data = self.requestData(
-                    sign, (orgId, self.strDate, page, Set.PAGE_SIZE))
+                    sign, (orgId, self.strDay, page, Set.PAGE_SIZE))
 
                 for subData in data:
                     subData["outIn"] = subData['inOut']
@@ -355,7 +387,7 @@ class Spider:
 
                 datas += data
 
-                self.printInfo(self.strDate, sign, len(datas),
+                self.printInfo(self.strDay, sign, len(datas),
                                'page:%s; orgId:%s; ' % (page, orgId))
 
                 if len(data) < Set.PAGE_SIZE:
@@ -370,14 +402,14 @@ class Spider:
         lines = self.selectLineSQL()
 
         for line in lines:
-            data = self.requestData(sign, (line[0], self.strDate))
+            data = self.requestData(sign, (line[0], self.strDay))
 
             for subData in data:
                 subData["lineId"] = line[0]
 
             datas += data
 
-            self.printInfo(self.strDate, sign, len(datas),
+            self.printInfo(self.strDay, sign, len(datas),
                            'lineId:%s; ' % (line[0]))
 
         return self.processData(sign, datas)
@@ -389,7 +421,7 @@ class Spider:
         lines = self.selectLineSQL()
 
         for line in lines:
-            data = self.requestData(sign, (line[0], self.strDate, line[3]))
+            data = self.requestData(sign, (line[0], self.strDay, line[3]))
 
             for subData in data:
                 subData["PBLineId"] = line[0]
@@ -399,7 +431,7 @@ class Spider:
 
             datas += data
 
-            self.printInfo(self.strDate, sign, len(datas),
+            self.printInfo(self.strDay, sign, len(datas),
                            'lineId:%s; lineType:%s; ' % (line[0], line[3]))
 
         return self.processData(sign, datas)
@@ -412,14 +444,14 @@ class Spider:
         for orgId in Set.ORG_ID:
             if orgId == '1C3DAEFA42964361BCF73D24F19127F9':
                 data = self.requestData(
-                    'RC1', (self.strDate, self.strDate, orgId, '04'))
+                    'RC1', (self.strDay, self.strDay, orgId, '04'))
             else:
                 data = self.requestData(
-                    'RC1', (self.strDate, self.strDate, orgId, '05'))
+                    'RC1', (self.strDay, self.strDay, orgId, '05'))
 
             datas += data
 
-            self.printInfo(self.strDate, sign, len(datas))
+            self.printInfo(self.strDay, sign, len(datas))
 
         data = self.requestData('RC2', (Set.ORG_ID[0]))
 
@@ -430,7 +462,7 @@ class Spider:
                     subDatas['RATE_LOSS'] = subData['RATE_LOSS']
                     subDatas['STAND_PERCE'] = subData['STAND_PERCE']
 
-        self.printInfo(self.strDate, sign, len(datas))
+        self.printInfo(self.strDay, sign, len(datas))
 
         return self.processData(sign, datas)
 
@@ -524,19 +556,19 @@ class Spider:
             days=int(self.date.strftime('%d')))).strftime('%Y-%m')
 
         data220 = self.requestData('VC3', ('33', Set.ORG_ID[0]))
-        self.printInfo(self.strDate, sign, len(datas), 'voltLevel:220kv; ')
+        self.printInfo(self.strDay, sign, len(datas), 'voltLevel:220kv; ')
 
         data110 = self.requestData('VC3', ('32', Set.ORG_ID[0]))
-        self.printInfo(self.strDate, sign, len(datas), 'voltLevel:110kv; ')
+        self.printInfo(self.strDay, sign, len(datas), 'voltLevel:110kv; ')
 
         data35 = self.requestData('VC3', ('25', Set.ORG_ID[0]))
-        self.printInfo(self.strDate, sign, len(datas), 'voltLevel:35kv; ')
+        self.printInfo(self.strDay, sign, len(datas), 'voltLevel:35kv; ')
 
         data10 = self.requestData('VC4', (strLastMonth))
-        self.printInfo(self.strDate, sign, len(datas), 'voltLevel:10kv; ')
+        self.printInfo(self.strDay, sign, len(datas), 'voltLevel:10kv; ')
 
         data380 = self.requestData('VC5', (strLastMonth))
-        self.printInfo(self.strDate, sign, len(datas), 'voltLevel:380v; ')
+        self.printInfo(self.strDay, sign, len(datas), 'voltLevel:380v; ')
 
         for data in datas:
             if data['ve'] == '33':
@@ -558,27 +590,27 @@ class Spider:
         datas = []
 
         for orgId in Set.ORG_ID:
-            data = self.requestData('VC1', (self.strDate, self.strDate, orgId))
+            data = self.requestData('VC1', (self.strDay, self.strDay, orgId))
             for subData in data:
                 subData['orgName'] = Set.ORG_ID_DICT[subData['orgId']]
                 subData['powerIn'] = subData['powerInTotal']
                 subData['powerOut'] = subData['powerOutTotal']
-                subData['statDate'] = self.strDate
+                subData['statDate'] = self.strDay
 
             datas += data
 
-            self.printInfo(self.strDate, sign, len(datas),
+            self.printInfo(self.strDay, sign, len(datas),
                            'orgId:%s; ' % (orgId))
 
         Id = 'd66bbf17-2310-4947-85d5-6922e3bd8ac4'
 
-        data = self.requestData('VC2', (self.strDate, Id))
+        data = self.requestData('VC2', (self.strDay, Id))
         for subData in data:
             if subData['ORG_ID'] == Set.ORG_ID[0]:
                 data = []
                 data.append(subData)
 
-        data += self.requestData('VC2', (self.strDate, Set.ORG_ID[0]))
+        data += self.requestData('VC2', (self.strDay, Set.ORG_ID[0]))
 
         for subData in data:
             subData['orgId'] = subData['ORG_ID']
@@ -597,7 +629,7 @@ class Spider:
 
         datas = self.Base_Rate(datas)
 
-        self.printInfo(self.strDate, sign, len(datas))
+        self.printInfo(self.strDay, sign, len(datas))
 
         return self.processData(sign, datas)
 
@@ -605,13 +637,13 @@ class Spider:
     def Line_Completion(self):
         sign = 'LC'
 
-        data = self.requestData(sign, (self.strDate))
+        data = self.requestData(sign, (self.strDay))
 
         for subData in data:
             subData['orgId'] = subData['id']
             subData['orgName'] = subData['name']
 
-        self.printInfo(self.strDate, sign, len(data))
+        self.printInfo(self.strDay, sign, len(data))
 
         return self.processData(sign, data)
 
@@ -619,12 +651,12 @@ class Spider:
     def Line_Loss_Completion(self):
         sign = 'LLC'
 
-        data = self.requestData(sign, (self.strDate))
+        data = self.requestData(sign, (self.strDay))
 
         for subData in data:
             subData['statDate'] = subData['STAT_DATE']
 
-        self.printInfo(self.strDate, sign, len(data))
+        self.printInfo(self.strDay, sign, len(data))
 
         return self.processData(sign, data)
 
@@ -633,18 +665,18 @@ class Spider:
         sign = 'TGC'
         datas = []
 
-        data = self.requestData(sign, (Set.ORG_ID[0], self.strDate, '04'))
+        data = self.requestData(sign, (Set.ORG_ID[0], self.strDay, '04'))
         datas += data
 
         orgId = 'D3305320A16D4D1EB4A82DD6A7C75A47'
-        data = self.requestData(sign, (orgId, self.strDate, '05'))
+        data = self.requestData(sign, (orgId, self.strDay, '05'))
         datas += data
 
         for subData in datas:
             subData['orgId'] = subData['id']
             subData['orgName'] = subData['name']
 
-        self.printInfo(self.strDate, sign, len(datas))
+        self.printInfo(self.strDay, sign, len(datas))
 
         return self.processData(sign, datas)
 
@@ -653,17 +685,17 @@ class Spider:
         sign = 'TGLC'
         datas = []
 
-        data = self.requestData(sign, (self.strDate, Set.ORG_ID[0]))
+        data = self.requestData(sign, (self.strDay, Set.ORG_ID[0]))
         datas += data
 
         orgId = 'D3305320A16D4D1EB4A82DD6A7C75A47'
-        data = self.requestData(sign, (self.strDate, orgId))
+        data = self.requestData(sign, (self.strDay, orgId))
         datas += data
 
         for subData in datas:
             subData['statDate'] = subData['STAT_DATE']
 
-        self.printInfo(self.strDate, sign, len(datas))
+        self.printInfo(self.strDay, sign, len(datas))
 
         return self.processData(sign, datas)
 
@@ -671,103 +703,78 @@ class Spider:
     def Integrity_Rate_Completion(self):
         sign = 'IRC'
 
-        data = self.requestData(sign, (self.strLastDate))
+        data = self.requestData(sign, (self.strLastDay))
 
         for subData in data:
-            subData['statDate'] = self.strLastDate
+            subData['statDate'] = self.strLastDay
 
-        self.printInfo(self.strLastDate, sign, len(data))
+        self.printInfo(self.strLastDay, sign, len(data))
 
         return self.processData(sign, data)
 
     # 爬取台区电流值
     def TG_Electric_Current(self):
         sign = 'TGEC'
-        datas = []
+
         tgs = self.selectTGSQL()
 
-        for tg in tgs:
-            data = self.requestData(sign, (self.strDate, Set.ORG_ID[0], tg[0]))
-
-            if len(data) == 0:
-                self.printInfo(self.strDate, sign, len(datas),
-                               'tgId:%s; isNULL; ' % (tg[0]))
-                continue
-
-            for subData in data:
-                datas += self.processData(sign, subData, tg[0])
-
-            self.printInfo(self.strDate, sign, len(datas),
-                           'tgId:%s; ' % (tg[0]))
-
-        return datas
+        return self.TGHVU_CVPF_Info(sign, tgs)
 
     # 爬取台区电压值
     def TG_Electric_Voltage(self):
         sign = 'TGEV'
-        datas = []
+
         tgs = self.selectTGSQL()
 
-        for tg in tgs:
-            data = self.requestData(sign, (self.strDate, Set.ORG_ID[0], tg[0]))
-
-            if len(data) == 0:
-                self.printInfo(self.strDate, sign, len(datas),
-                               'tgId:%s; isNULL; ' % (tg[0]))
-                continue
-
-            for subData in data:
-                datas += self.processData(sign, subData, tg[0])
-
-            self.printInfo(self.strDate, sign, len(datas),
-                           'tgId:%s; ' % (tg[0]))
-
-        return datas
+        return self.TGHVU_CVPF_Info(sign, tgs)
 
     # 爬取台区功率因数
     def TG_Power_Curve(self):
         sign = 'TGPC'
-        datas = []
+
         tgs = self.selectTGSQL()
 
-        for tg in tgs:
-            data = self.requestData(sign, (self.strDate, Set.ORG_ID[0], tg[0]))
-
-            if len(data) == 0:
-                self.printInfo(self.strDate, sign, len(datas),
-                               'tgId:%s; isNULL; ' % (tg[0]))
-                continue
-
-            for subData in data:
-                datas += self.processData(sign, subData, tg[0])
-
-            self.printInfo(self.strDate, sign, len(datas),
-                           'tgId:%s; ' % (tg[0]))
-
-        return datas
+        return self.TGHVU_CVPF_Info(sign, tgs)
 
     # 爬取台区功率因数
     def TG_Power_Factor(self):
         sign = 'TGPF'
-        datas = []
+
         tgs = self.selectTGSQL()
 
-        for tg in tgs:
-            data = self.requestData(sign, (self.strDate, Set.ORG_ID[0], tg[0]))
+        return self.TGHVU_CVPF_Info(sign, tgs)
 
-            if len(data) == 0:
-                self.printInfo(self.strDate, sign, len(datas),
-                               'tgId:%s; isNULL; ' % (tg[0]))
-                continue
-            # print(data)
-            for subData in data:
-                datas += self.processData(sign, subData, tg[0])
+    # 爬取高压用户电流值
+    def HVU_Electric_Current(self):
+        sign = 'HVUEC'
 
-            self.printInfo(self.strDate, sign, len(datas),
-                           'tgId:%s; ' % (tg[0]))
-            # if '941527835' == tg[0]:
-            #     break
-        return datas
+        consIds = self.selectHVUSQL()
+
+        return self.TGHVU_CVPF_Info(sign, consIds)
+
+    # 爬取高压用户电压值
+    def HVU_Electric_Voltage(self):
+        sign = 'HVUEV'
+
+        consIds = self.selectHVUSQL()
+
+        return self.TGHVU_CVPF_Info(sign, consIds)
+
+    # 爬取高压用户功率因数
+    def HVU_Power_Curve(self):
+        sign = 'HVUPC'
+
+        consIds = self.selectHVUSQL()
+
+        return self.TGHVU_CVPF_Info(sign, consIds)
+
+    # 爬取高压用户功率因数
+    def HVU_Power_Factor(self):
+        sign = 'HVUPF'
+
+        consIds = self.selectHVUSQL()
+
+        return self.TGHVU_CVPF_Info(sign, consIds)
 
     # 爬取用户电表码值信息
     def User_Table_Value(self):
@@ -777,14 +784,14 @@ class Spider:
         for tg in tgs:
             for page in range(1, 1000):
                 data = self.requestData(
-                    sign, (tg[0], self.strDate, page, Set.PAGE_SIZE))
+                    sign, (tg[0], self.strDay, page, Set.PAGE_SIZE))
                 for subData in data:
                     subData["tgId"] = tg[0]
-                    subData["statDate"] = self.strDate
+                    subData["statDate"] = self.strDay
 
                 datas += data
 
-                self.printInfo(self.strDate, sign, len(datas),
+                self.printInfo(self.strDay, sign, len(datas),
                                'tgId:%s; page:%s; ' % (tg[0], page))
 
                 if len(data) < Set.PAGE_SIZE:
@@ -792,81 +799,274 @@ class Spider:
 
         return self.processData(sign, datas)
 
+    # 爬取线路电量信息（月）
+    def Line_Power_Month_Info(self):
+        sign = 'LPMI'
+        datas = []
+
+        for page in range(1, 1000):
+            data = self.requestData(sign, (self.strLastMonth, page, Set.PAGE_SIZE))
+            datas += data
+
+            self.printInfo(self.strLastMonth, sign, len(datas),
+                           'page:%s; ' % (page))
+
+            if len(data) < Set.PAGE_SIZE:
+                break
+
+        return self.processData(sign, datas)
+
+    # 爬取线路关口电量信息（月）
+    def Gateway_Power_Month_Info(self):
+        sign = 'GPMI'
+        datas = []
+
+        for orgId in Set.ORG_ID:
+            if orgId == Set.ORG_ID[0]:
+                continue
+            for page in range(1, 1000):
+                data = self.requestData(
+                    sign, (orgId, self.strLastMonth, page, Set.PAGE_SIZE))
+
+                for subData in data:
+                    subData["outIn"] = subData['inOut']
+                    subData["statDate"] = subData['dataDate']
+
+                datas += data
+
+                self.printInfo(self.strLastMonth, sign, len(datas),
+                               'page:%s; orgId:%s; ' % (page, orgId))
+
+                if len(data) < Set.PAGE_SIZE:
+                    break
+
+        return self.processData(sign, datas)
+
+    # 爬取台区电量信息（月）
+    def TG_Power_Month_Info(self):
+        sign = 'TGPMI'
+        datas = []
+        lines = self.selectLineSQL('m')
+
+        for line in lines:
+            data = self.requestData(sign, (line[0], self.strLastMonth))
+
+            for subData in data:
+                subData["lineId"] = line[0]
+
+            datas += data
+
+            self.printInfo(self.strLastMonth, sign, len(datas),
+                           'lineId:%s; ' % (line[0]))
+
+        return self.processData(sign, datas)
+
+    # 爬取台区和专变（高压用户）电表码值信息（月）
+    def TG_Table_Month_Value(self):
+        sign = 'TGTMV'
+        datas = []
+        lines = self.selectLineSQL('m')
+
+        for line in lines:
+            data = self.requestData(sign, (line[0], self.strLastMonth, line[3]))
+
+            for subData in data:
+                subData["PBLineId"] = line[0]
+                subData["PBLineNo"] = line[1]
+                subData["PBLineName"] = line[2]
+                subData["PBLineType"] = line[3]
+                subData["statDate"] = self.strLastMonth
+
+            datas += data
+
+            self.printInfo(self.strLastMonth, sign, len(datas),
+                           'lineId:%s; lineType:%s; ' % (line[0], line[3]))
+
+        return self.processData(sign, datas)
+
+    # 爬取用户电表码值信息（月）
+    def User_Table_Month_Value(self):
+        sign = 'UTMV'
+        datas = []
+        tgs = self.selectTGSQL()
+        for tg in tgs:
+            for page in range(1, 1000):
+                data = self.requestData(
+                    sign, (tg[0], self.strLastMonth, page, Set.PAGE_SIZE))
+                for subData in data:
+                    subData["tgId"] = tg[0]
+                    subData["statDate"] = self.strLastMonth
+
+                datas += data
+
+                self.printInfo(self.strLastMonth, sign, len(datas),
+                               'tgId:%s; page:%s; ' % (tg[0], page))
+
+                if len(data) < Set.PAGE_SIZE:
+                    break
+
+        return self.processData(sign, datas)
+
+    # 爬取线路基础信息
+    def Line_Base_Info(self):
+        sign = 'LBI'
+        datas = []
+
+        for page in range(1, 1000):
+            data = self.requestData(sign, (page, Set.PAGE_SIZE))
+
+            for subData in data:
+                subData["statDate"] = self.strLastMonth
+
+            datas += data
+
+            self.printInfo(self.strLastMonth, sign, len(datas),
+                           'page:%s; ' % (page))
+
+            if len(data) < Set.PAGE_SIZE:
+                break
+
+        return self.processData(sign, datas)
+
+    # 爬取台区基础信息
+    def TG_Base_Info(self):
+        sign = 'TGBI'
+        datas = []
+
+        for page in range(1, 1000):
+            data = self.requestData(sign, (page, Set.PAGE_SIZE))
+            
+            for subData in data:
+                subData["statDate"] = self.strLastMonth
+
+            datas += data
+
+            self.printInfo(self.strLastMonth, sign, len(datas),
+                           'page:%s; ' % (page))
+
+            if len(data) < Set.PAGE_SIZE:
+                break
+
+        return self.processData(sign, datas)
+
     # 执行爬取
     def implement(self):
         if not self.isExist('RC'):
             RC = self.Region_Completion()
-            self.insertSQL(Set.TABLE_NAME['RC'], Set.TABLE['RC'], RC)
+            self.insertSQL('RC', RC)
 
         if not self.isExist('VC'):
             VC = self.Voltage_Completion()
-            self.insertSQL(Set.TABLE_NAME['VC'], Set.TABLE['VC'], VC)
+            self.insertSQL('VC', VC)
 
         if not self.isExist('LC'):
             LC = self.Line_Completion()
-            self.insertSQL(Set.TABLE_NAME['LC'], Set.TABLE['LC'], LC)
+            self.insertSQL('LC', LC)
 
         if not self.isExist('LLC'):
             LLC = self.Line_Loss_Completion()
-            self.insertSQL(Set.TABLE_NAME['LLC'], Set.TABLE['LLC'], LLC)
+            self.insertSQL('LLC', LLC)
 
         if not self.isExist('TGC'):
             TGC = self.TG_Completion()
-            self.insertSQL(Set.TABLE_NAME['TGC'], Set.TABLE['TGC'], TGC)
+            self.insertSQL('TGC', TGC)
 
         if not self.isExist('TGLC'):
             TGLC = self.TG_Loss_Completion()
-            self.insertSQL(Set.TABLE_NAME['TGLC'], Set.TABLE['TGLC'], TGLC)
+            self.insertSQL('TGLC', TGLC)
 
         if not self.isExist('IRC'):
             IRC = self.Integrity_Rate_Completion()
-            self.insertSQL(Set.TABLE_NAME['IRC'], Set.TABLE['IRC'], IRC)
+            self.insertSQL('IRC', IRC)
 
         if not self.isExist('TGAI'):
             TGAI = self.TG_Abnormal_Info()
-            self.insertSQL(Set.TABLE_NAME['TGAI'], Set.TABLE['TGAI'], TGAI)
+            self.insertSQL('TGAI', TGAI)
 
         if not self.isExist('LAI'):
             LAI = self.Line_Abnormal_Info()
-            self.insertSQL(Set.TABLE_NAME['LAI'], Set.TABLE['LAI'], LAI)
+            self.insertSQL('LAI', LAI)
 
         if not self.isExist('LPI'):
             LPI = self.Line_Power_Info()
-            self.insertSQL(Set.TABLE_NAME['LPI'], Set.TABLE['LPI'], LPI)
+            self.insertSQL('LPI', LPI)
 
         if not self.isExist('GPI'):
             GPI = self.Gateway_Power_Info()
-            self.insertSQL(Set.TABLE_NAME['GPI'], Set.TABLE['GPI'], GPI)
+            self.insertSQL('GPI', GPI)
 
         if not self.isExist('TGPI'):
             TGPI = self.TG_Power_Info()
-            self.insertSQL(Set.TABLE_NAME['TGPI'], Set.TABLE['TGPI'], TGPI)
+            self.insertSQL('TGPI', TGPI)
 
         if not self.isExist('TGTV'):
             TGTV = self.TG_Table_Value()
-            self.insertSQL(Set.TABLE_NAME['TGTV'], Set.TABLE['TGTV'], TGTV)
+            self.insertSQL('TGTV', TGTV)
 
         if not self.isExist('TGEC'):
             TGEC = self.TG_Electric_Current()
-            self.insertSQL(Set.TABLE_NAME['TGEC'], Set.TABLE['TGEC'], TGEC)
+            self.insertSQL('TGEC', TGEC)
 
         if not self.isExist('TGEV'):
             TGEV = self.TG_Electric_Voltage()
-            self.insertSQL(Set.TABLE_NAME['TGEV'], Set.TABLE['TGEV'], TGEV)
+            self.insertSQL('TGEV', TGEV)
 
         if not self.isExist('TGPC'):
             TGPC = self.TG_Power_Curve()
-            self.insertSQL(Set.TABLE_NAME['TGPC'], Set.TABLE['TGPC'], TGPC)
+            self.insertSQL('TGPC', TGPC)
 
         if not self.isExist('TGPF'):
             TGPF = self.TG_Power_Factor()
-            self.insertSQL(Set.TABLE_NAME['TGPF'], Set.TABLE['TGPF'], TGPF)
+            self.insertSQL('TGPF', TGPF)
 
-        if not self.isExist('UTV'):
+        if not self.isExist('HVUEC'):
+            HVUEC = self.HVU_Electric_Current()
+            self.insertSQL('HVUEC', HVUEC)
+
+        if not self.isExist('HVUEV'):
+            HVUEV = self.HVU_Electric_Voltage()
+            self.insertSQL('HVUEV', HVUEV)
+
+        if not self.isExist('HVUPC'):
+            HVUPC = self.HVU_Power_Curve()
+            self.insertSQL('HVUPC', HVUPC)
+
+        if not self.isExist('HVUPF'):
+            HVUPF = self.HVU_Power_Factor()
+            self.insertSQL('HVUPF', HVUPF)
+
+        if not self.isExist('UTV', self.strTableMonth):
             UTV = self.User_Table_Value()
-            self.insertSQL(Set.TABLE_NAME['UTV'], Set.TABLE['UTV'], UTV)
+            self.insertSQL('UTV', UTV, self.strTableMonth)
+
+        if int(datetime.datetime.now().strftime('%d')) > 7:
+            if not self.isExist('LPMI'):
+                LPMI = self.Line_Power_Month_Info()
+                self.insertSQL('LPMI', LPMI)
+
+            if not self.isExist('GPMI'):
+                GPMI = self.Gateway_Power_Month_Info()
+                self.insertSQL('GPMI', GPMI)
+
+            if not self.isExist('TGPMI'):
+                TGPMI = self.TG_Power_Month_Info()
+                self.insertSQL('TGPMI', TGPMI)
+
+            if not self.isExist('TGTMV'):
+                TGTMV = self.TG_Table_Month_Value()
+                self.insertSQL('TGTMV', TGTMV)
+
+            if not self.isExist('UTMV'):
+                UTMV = self.User_Table_Month_Value()
+                self.insertSQL('UTMV', UTMV)
+
+            # if not self.isExist('LBI'):
+            #     LBI = self.Line_Base_Info()
+            #     self.insertSQL('LBI', LBI)
+
+            # if not self.isExist('TGBI'):
+            #     TGBI = self.TG_Base_Info()
+            #     self.insertSQL('TGBI', TGBI)
 
     def __del__(self):
-        self.cur.close()
-        self.coon.close()
-        self.file.close()
+        Base.__del__(self)

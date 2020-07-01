@@ -1,8 +1,6 @@
 import sys
 import datetime
-
-from spider import Spider
-from process import Process
+import configparser
 
 
 def printTips():
@@ -28,20 +26,21 @@ if __name__ == "__main__":
     except Exception:
         printTips()
 
-    if sign == 1:  # 爬取三天的，如果之前数据爬取有问题，三天之内会重爬
+    if sign == 1:
         for i in range(2, 5):
             date = datetime.datetime.now() - datetime.timedelta(days=i)
-            s = Spider(date)
-            s.implement()
-
-            p = Process(date)
-            p.implement()
-    else:  # 爬取历史数据
+            print(date)
+    else:
         while begin <= (datetime.datetime.now() - datetime.timedelta(days=2)) and begin <= end:
-            s = Spider(begin)
-            s.implement()
-
-            p = Process(begin)
-            p.implement()
-
+            print(begin)
             begin += datetime.timedelta(days=1)
+        print(end)
+
+    # 读取配置文件
+    config = configparser.ConfigParser()
+    config.read('conf.ini')
+    db = {}
+    for item in config.items('db'):
+        db[item[0]] = item[1]
+
+    print(db)
