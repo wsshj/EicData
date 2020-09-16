@@ -19,9 +19,9 @@ class Base:
 
         self.strLastDay = self.lastDay.strftime('%Y-%m-%d')
         self.strLastMonth = self.lastMonth.strftime('%Y-%m')
-        
+
         self.strTableMonth = date.strftime('_%Y_%m')
-        
+
         self.coon, self.cur = self.connectSQL(self.readConfig())
         self.file = self.openFile()
 
@@ -29,11 +29,15 @@ class Base:
         db = {}
 
         config = configparser.ConfigParser()
-        path = os.path.dirname(os.path.realpath(sys.executable))
+        # path = os.path.dirname(os.path.realpath(sys.executable))
+        path = os.path.dirname(__file__)
         config.read('%s\\conf.ini' % path)
 
         for item in config.items('db'):
             db[item[0]] = item[1]
+
+            if item[0] == 'port':
+                db[item[0]] = int(item[1])
 
         return db
 
